@@ -1,4 +1,3 @@
-import multiprocessing
 import subprocess
 import json
 import logging
