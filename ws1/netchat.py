@@ -1,3 +1,4 @@
+import multiprocessing
 import subprocess
 import json
 import logging
@@ -49,6 +50,7 @@ class Netchat:
         self.whoami['ip'] = ipaddress
 
         self.peers: dict = {}
+        self.kill_all = False
 
         self.dict_lock = threading.Lock()
 
@@ -64,8 +66,9 @@ class Netchat:
         self.t3.start()
 
         # these are practically alive until the program terminates
-        self.t1.join()        
         self.t3.join()
+        self.t1.join()        
+        
 
     def get_ip_by_name(self, name: str):
         for peer in self.peers:
@@ -74,10 +77,11 @@ class Netchat:
         return None
     
     def listen_user(self):
-        while True:
+        while not self.kill_all:
             line = input()
-            if line == ":exit":
+            if line == ":quit":
                 self.shutdown()
+                self.kill_all = True
                 break
 
             if line == ":peers":
@@ -119,14 +123,12 @@ class Netchat:
         byebye_message['ip'] = self.whoami['ip']
         byebye_message['name'] = self.whoami['name']
 
-        for peer in self.peers:
-            self.send_message(byebye_message, peer)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+            for peer in self.peers:
+                executor.submit(self.send_message, byebye_message, peer)
         logging.info("Left the network.")
 
     def discover_peers(self):
-        """
-            Sends a hello message to all the peers in the network.
-        """
         hello_message = HELLO_MESSAGE.copy()
         hello_message['ip'] = self.whoami['ip'] 
         hello_message['name'] = self.whoami['name']
@@ -144,7 +146,7 @@ class Netchat:
 
     def listen_network(self):
         process = subprocess.Popen([f'nc -lk {str(PORT)}'], shell=True, stdout=subprocess.PIPE)
-        while True:
+        while True and not self.kill_all:
             output = process.stdout.readline()
             if output == '' and process.poll() is not None:
                 break
@@ -201,5 +203,5 @@ class Netchat:
         
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.ERROR)
     Netchat('deniz')
