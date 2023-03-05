@@ -4,7 +4,7 @@ import logging
 import socket
 import datetime
 import threading
-import multiprocessing
+import concurrent.futures
 
 PORT = 12345
 
@@ -50,7 +50,6 @@ class Netchat:
 
         self.peers: dict = {}
 
-        self.pool: multiprocessing.Pool = multiprocessing.Pool(processes=4) # 256 - 1 (self) - 1 (0) 
         self.dict_lock = threading.Lock()
 
         self.t1 = threading.Thread(target=self.listen_network)
@@ -131,17 +130,16 @@ class Netchat:
         hello_message = HELLO_MESSAGE.copy()
         hello_message['ip'] = self.whoami['ip'] 
         hello_message['name'] = self.whoami['name']
-
-        for i in range(1,256):
-            # don't send to yourself
-            if i == int(self.whoami['ip'].split('.')[-1]):
-                continue
-            else:
-                candidate: list[str] = self.whoami['ip'].split('.')[:-1] + [str(i)]
-                candidate: str = ".".join(candidate)
-                # multithread here
-                self.pool.apply_async(self.send_message, args=(hello_message, candidate))
-        self.pool.close()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+            for i in range(1,256):
+                # don't send to yourself
+                if i == int(self.whoami['ip'].split('.')[-1]):
+                    continue
+                else:
+                    candidate: list[str] = self.whoami['ip'].split('.')[:-1] + [str(i)]
+                    candidate: str = ".".join(candidate)
+                    # multithread here
+                    executor.submit(self.send_message, hello_message, candidate)
         logging.info("Peers discovered.")
 
     def listen_network(self):
