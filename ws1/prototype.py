@@ -43,6 +43,7 @@ class Netchat:
         ipaddress: str = socket.gethostbyname(hostname)
         logging.info(f"Hostname: {hostname} IP: {ipaddress}")
 
+        self.whoami: dict = {}
         self.whoami['name'] = name
         self.whoami['ip'] = ipaddress
 
@@ -179,7 +180,7 @@ class Netchat:
             print(e)
             logging.error("Error while processing the message.")
     
-    def send_message(self, message: dict[str], ip:str, timeout:int= 1):
+    def send_message(self, message: dict[str], ip:str, timeout:int= 0.02):
         try:
             logging.info(f"Sending \"{message['type']}\" message to {ip}")
             process = subprocess.run([f'echo \'{json.dumps(message)}\' | nc -w {str(timeout)} {ip} {str(PORT)}'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
