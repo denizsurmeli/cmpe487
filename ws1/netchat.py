@@ -36,10 +36,7 @@ LEAVE_MESSAGE = {
 
 class Netchat:
     def __init__(self, name: str = None):
-        """
-            Discovers peers and introduces itself to the network.
-            Sets up the `peers` dictionary.
-        """
+        print("Joining the network.\nDiscovering peers.")
         logging.info("Discovering peers...")
         hostname: str = socket.gethostname()
         ipaddress: str = socket.gethostbyname(hostname)
@@ -63,6 +60,7 @@ class Netchat:
         # first discover peers, then accept actions from the user
         self.t2.start()
         self.t2.join()
+        print("Possible peers discovered.")
         self.t3.start()
 
         # these are practically alive until the program terminates
@@ -79,6 +77,8 @@ class Netchat:
     def listen_user(self):
         while not self.kill_all:
             line = input()
+            if line == ":whoami":
+                print(f"IP:{self.whoami['ip']}\tName:{self.whoami['name']}")
             if line == ":quit":
                 self.shutdown()
                 self.kill_all = True
@@ -112,7 +112,7 @@ class Netchat:
                     message['content'] = content
 
                     if ip is None:
-                        print(f"Peer with name {name} not found.")
+                        print(f"Peer with name \"{name}\" not found.")
                     else:
                         self.send_message(message, ip)
                 except:
@@ -132,6 +132,7 @@ class Netchat:
         hello_message = HELLO_MESSAGE.copy()
         hello_message['ip'] = self.whoami['ip'] 
         hello_message['name'] = self.whoami['name']
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
             for i in range(1,256):
                 # don't send to yourself
@@ -168,13 +169,17 @@ class Netchat:
                 self.add_peer(message['ip'], message['name'], self.dict_lock)
             
             if message['type'] == 'message':
-                print(f"[{datetime.datetime.now()}] | FROM: {self.peers[message['ip']]}({message['ip']}): {message['content']}")
+                _ip = message['ip']
+                _content = message['content']
+                _from = 'UNKNOWN_HOST' if message['ip'] not in self.peers.keys() else self.peers[message['ip']]
+
+                print(f"[{datetime.datetime.now()}] | FROM: {_from}({_ip}): {_content}")
 
             if message['type'] == 'aleykumselam':
                 logging.info(f"Peer found. ip: {message['ip']} name: {message['name']} ")
                 self.add_peer(message['ip'], message['name'], self.dict_lock)
             
-            # this is not in the spec but definetely needed
+            # this is not in the spec but it's a nice touchup
             if message['type'] == 'byebye':
                 logging.info(f"Peer left. ip: {message['ip']} name: {message['name']}")
                 self.peers.pop(message['ip']) 
