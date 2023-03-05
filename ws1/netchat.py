@@ -1,3 +1,4 @@
+import multiprocessing
 import subprocess
 import json
 import logging
@@ -119,8 +120,9 @@ class Netchat:
         byebye_message['ip'] = self.whoami['ip']
         byebye_message['name'] = self.whoami['name']
 
-        for peer in self.peers:
-            self.send_message(byebye_message, peer)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+            for peer in self.peers:
+                executor.submit(self.send_message, byebye_message, peer)
         logging.info("Left the network.")
 
     def discover_peers(self):
@@ -203,3 +205,4 @@ class Netchat:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     Netchat('deniz')
+    exit(0)
