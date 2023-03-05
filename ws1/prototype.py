@@ -79,10 +79,24 @@ class Netchat:
             if line == ":exit":
                 self.shutdown()
                 break
+
             if line == ":peers":
                 print("IP:\t\tName:")
                 for peer in self.peers:
                     print(f"{peer}\t{self.peers[peer]}")
+                
+            if line.startswith(":hello"):
+                try:
+                    name = line.split()[1]
+                    ip = name.strip()
+                    hello_message = HELLO_MESSAGE.copy()
+                    hello_message['ip'] = self.whoami.ip
+                    hello_message['name'] = self.whoami.name
+                    self.send_message(hello_message, ip)
+                except:
+                    print("Invalid command. Usage: :hello ip")
+
+            
             if line.startswith(":send"):
                 try:
                     name, content = line.split()[1:]
