@@ -31,10 +31,6 @@ LEAVE_MESSAGE = {
     "name":None
 }
 
-class Peer:
-    def __init__(self, ip: str, name: str):
-        self.ip = ip
-        self.name = name
 
 class Netchat:
     def __init__(self, name: str):
@@ -47,7 +43,9 @@ class Netchat:
         ipaddress: str = socket.gethostbyname(hostname)
         logging.info(f"Hostname: {hostname} IP: {ipaddress}")
 
-        self.whoami: Peer = Peer(ipaddress, name)
+        self.whoami['name'] = name
+        self.whoami['ip'] = ipaddress
+
         self.peers: dict = {}
 
         self.dict_lock = threading.Lock()
@@ -90,8 +88,8 @@ class Netchat:
                     name = line.split()[1]
                     ip = name.strip()
                     hello_message = HELLO_MESSAGE.copy()
-                    hello_message['ip'] = self.whoami.ip
-                    hello_message['name'] = self.whoami.name
+                    hello_message['ip'] = self.whoami['ip']
+                    hello_message['name'] = self.whoami['name']
                     self.send_message(hello_message, ip)
                 except:
                     print("Invalid command. Usage: :hello ip")
@@ -104,7 +102,7 @@ class Netchat:
                     content = content.strip()
                     ip = self.get_ip_by_name(name)
                     message = MESSAGE.copy()
-                    message['ip'] = self.whoami.ip
+                    message['ip'] = self.whoami['ip']
                     message['content'] = content
 
                     if ip is None:
@@ -116,8 +114,8 @@ class Netchat:
     
     def shutdown(self):
         byebye_message = LEAVE_MESSAGE.copy()
-        byebye_message['ip'] = self.whoami.ip
-        byebye_message['name'] = self.whoami.name
+        byebye_message['ip'] = self.whoami['ip']
+        byebye_message['name'] = self.whoami['name']
 
         for peer in self.peers:
             self.send_message(byebye_message, peer)
@@ -128,18 +126,18 @@ class Netchat:
             Sends a hello message to all the peers in the network.
         """
         hello_message = HELLO_MESSAGE.copy()
-        hello_message['ip'] = self.whoami.ip    
-        hello_message['name'] = self.whoami.name
+        hello_message['ip'] = self.whoami['ip'] 
+        hello_message['name'] = self.whoami['name']
 
         for i in range(1,256):
             # don't send to yourself
-            if i == int(self.whoami.ip.split('.')[-1]):
+            if i == int(self.whoami['ip'].split('.')[-1]):
                 continue
             else:
-                candidate: list[str] = self.whoami.ip.split('.')[:-1] + [str(i)]
+                candidate: list[str] = self.whoami['ip'].split('.')[:-1] + [str(i)]
                 candidate: str = ".".join(candidate)
                 # multithread here
-                self.send_message(ip=candidate, message=hello_message)
+                self.send_message(hello_message, candidate)
         logging.info("Peers discovered.")
 
     def listen_network(self):
@@ -159,8 +157,8 @@ class Netchat:
                 logging.info(f"Peer reached, sending ACK. ip: {message['ip']} name: {message['name']}")
 
                 ack = ACK_MESSAGE.copy()
-                ack['ip'] = self.whoami.ip
-                ack['name'] = self.whoami.name
+                ack['ip'] = self.whoami['ip']
+                ack['name'] = self.whoami['name']
 
                 self.send_message(ack, ip=message['ip'])
                 self.add_peer(message['ip'], message['name'], self.dict_lock)
@@ -181,10 +179,10 @@ class Netchat:
             print(e)
             logging.error("Error while processing the message.")
     
-    def send_message(self, message: dict[str], ip:str, timeout:int= 0.02):
+    def send_message(self, message: dict[str], ip:str, timeout:int= 1):
         try:
             logging.info(f"Sending \"{message['type']}\" message to {ip}")
-            process = subprocess.run([f'echo {json.dumps(message)} | nc -w {str(timeout)} {ip} {str(PORT)}'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            process = subprocess.run([f'echo \'{json.dumps(message)}\' | nc -w {str(timeout)} {ip} {str(PORT)}'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
             logging.info(f"Message sent. ip: {ip}")
         except subprocess.TimeoutExpired:
             pass
