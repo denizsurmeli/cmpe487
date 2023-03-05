@@ -183,7 +183,7 @@ class Netchat:
     def send_message(self, message: dict[str], ip:str, timeout:int= 0.02):
         try:
             logging.info(f"Sending \"{message['type']}\" message to {ip}")
-            process = subprocess.run([f'echo \'{json.dumps(message)}\' | nc -w {str(timeout)} {ip} {str(PORT)}'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            process = subprocess.run([f'echo \'{json.dumps(message)}\' | nc {ip} {str(PORT)}'], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
             logging.info(f"Message sent. ip: {ip}")
         except subprocess.TimeoutExpired:
             pass
