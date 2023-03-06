@@ -52,6 +52,7 @@ class Netchat:
         self.dict_lock = threading.Lock()
 
         self.t1 = threading.Thread(target=self.listen_network)
+        self.t1.daemon = True
         self.t2 = threading.Thread(target=self.discover_peers)
         self.t3 = threading.Thread(target=self.listen_user)
 
@@ -65,7 +66,6 @@ class Netchat:
 
         # these are practically alive until the program terminates
         self.t3.join()
-        self.t1.join()        
         
 
     def get_ip_by_name(self, name: str):
@@ -79,6 +79,7 @@ class Netchat:
             line = input()
             if line == ":whoami":
                 print(f"IP:{self.whoami['ip']}\tName:{self.whoami['name']}")
+
             if line == ":quit":
                 self.shutdown()
                 self.kill_all = True
@@ -147,9 +148,12 @@ class Netchat:
 
     def listen_network(self):
         process = subprocess.Popen([f'nc -lk {str(PORT)}'], shell=True, stdout=subprocess.PIPE)
-        while True and not self.kill_all:
+        while True:
             output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
+            if self.kill_all:
+                process.terminate()
+                raise Exception("kill this")
+            if (output == '' and process.poll() is not None):
                 break
             if output:
                 self.process_message(output.strip())
@@ -208,5 +212,5 @@ class Netchat:
         
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.ERROR)
+    logging.basicConfig(level=logging.INFO)
     Netchat('deniz')
