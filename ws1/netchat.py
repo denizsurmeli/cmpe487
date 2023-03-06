@@ -39,7 +39,7 @@ class Netchat:
         print("Joining the network.\nDiscovering peers.")
         logging.info("Discovering peers...")
         hostname: str = socket.gethostname()
-        ipaddress: str = socket.gethostbyname(hostname)
+        ipaddress: str = socket.gethostbyname_ex(hostname)[-1][-1]
         logging.info(f"Hostname: {hostname} IP: {ipaddress}")
 
         self.whoami: dict = {}
