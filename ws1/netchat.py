@@ -145,6 +145,7 @@ class Netchat:
                     candidate: str = ".".join(candidate)
                     # multithread here
                     executor.submit(self.send_message, hello_message, candidate)
+            executor.shutdown(wait=True)
         logging.info("Peers discovered.")
 
     def listen_network(self):
@@ -214,4 +215,4 @@ class Netchat:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    Netchat('sabri')
+    Netchat('deniz')
