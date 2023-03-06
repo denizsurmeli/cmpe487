@@ -104,7 +104,8 @@ class Netchat:
             
             if line.startswith(":send"):
                 try:
-                    name, content = line.split()[1:]
+                    # strip command from the second empty spaace and keep the rest as content
+                    name, content = line.split(" ", 2)[1], line.split(" ", 2)[2]
                     name = name.strip()
                     content = content.strip()
                     ip = self.get_ip_by_name(name)
@@ -213,4 +214,4 @@ class Netchat:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    Netchat('deniz')
+    Netchat('sabri')
