@@ -35,6 +35,7 @@ class MessageType(enum.Enum):
 class Netchat:
     def __init__(self, name: str = None):
         logging.info("Finding out whoami.")
+        self.terminate = False
         hostname: str = socket.gethostname()
         ipaddress: str = socket.gethostbyname_ex(hostname)[-1][-1] 
         logging.info(f"Resolved whoami. IP:{ipaddress} \t Hostname:{hostname}")
@@ -46,15 +47,18 @@ class Netchat:
         self.peers: dict = {}
         self.listener_threads: dict = {}
 
-        self.discover_peers()
-        for ip, _ in self.peers:
+        possible_peers = self.discover_peers()
+
+        for ip in possible_peers:
             self.listener_threads[ip] = threading.Thread(target=self.listen_peer, args=(ip))
+            logging.info(f"Starting the listener on {ip}")
+            self.listener_threads[ip].start()
+        
+        self.join_network()
         
         self.user_input_thread = threading.Thread(target=self.listen_user)
-    
+        self.user_input_thread.start()
         self.user_input_thread.join()
-        for ip, thread in self.listener_threads:
-            thread.join()
         
 
 
@@ -67,7 +71,12 @@ class Netchat:
         return None
     
     def shutdown(self):
-        return None 
+        logging.info("Terminating...")
+        self.terminate = True
+        for ip, thread in self.listener_threads:
+            thread.join()
+            logging.info(f"{ip} listener closed.")
+        
     
     def listen_user(self):
             while True:
@@ -121,6 +130,10 @@ class Netchat:
         syscall = syscall.split(" ")
         process = subprocess.run(syscall, stdout=subprocess.PIPE)
         possible_peers = re.findall(IP_PATTERN, str(process.stdout))
+
+        return possible_peers
+
+    def join_network(self, possible_peers: list[str]):
         if len(possible_peers) == 0:
             # TODO: add rescan
             logging.warn("No peers on the network. Will rescan after 5 seconds.")
@@ -130,7 +143,6 @@ class Netchat:
                 for candidate in possible_peers:
                     executor_pool.submit(self.send_message, candidate, MessageType.hello)
                 executor_pool.shutdown(wait=True)
-
 
     def send_message(self, ip:str, type:MessageType, content: str = None, port: int = PORT):
         try:
@@ -150,7 +162,9 @@ class Netchat:
                 
                 encode = json.dumps(message).encode('ascii')
                 s.sendall(encode)
-                logging.info("Sent the message.")
+                logging.info("Sent the message")
+                s.close()
+                logging.info(f"Closed the connection on {ip}")
         except Exception as e:
             logging.error(f"Error while sending the message. Reason: {e}")
 
@@ -187,7 +201,7 @@ class Netchat:
             try:
                 s.bind((ip, port))
                 s.listen()
-                while True:
+                while True and not self.terminate:
                     conn, addr = s.accept()
                     with conn:
                         while True:
@@ -196,6 +210,9 @@ class Netchat:
                                 break
                             data = str(data) # deserialize here
                             self.process_message(data, addr)
+                if self.terminate:
+                    logging.info(f"Closed the connection on {ip}")
+                    s.close()
             except OSError as os_error:
                 if os_error.errno == 61:
                     logging.error("The port is closed on the peer. Dropping the peer from book")
