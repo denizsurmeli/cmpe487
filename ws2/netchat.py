@@ -98,7 +98,7 @@ class Netchat:
                         name = line.split()[1]
                         ip = name.strip()
                         match = re.match(IP_PATTERN, ip)
-                        if match:
+                        if match and self.whoami["ip"] != ip :
                             hello_message = HELLO_MESSAGE.copy()
                             hello_message["myname"] = self.whoami["myname"]
                             self.send_message(ip)
@@ -126,7 +126,6 @@ class Netchat:
         scanning_block = ".".join(self.whoami['ip'].split('.')[:-1]) + ".0/24"
         logging.info(f"Discovering peers using nmap, scanning block {scanning_block} on port {PORT}")
         syscall = f"nmap -p {port} "+ ".".join(self.whoami['ip'].split('.')[:-1]) + ".0/24"
-        print(syscall)
         syscall = syscall.split(" ")
         process = subprocess.run(syscall, stdout=subprocess.PIPE)
         possible_peers = re.findall(IP_PATTERN, str(process.stdout))
@@ -141,7 +140,8 @@ class Netchat:
             logging.info(f"Sending 'hello' to {len(possible_peers)} possible peers")
             with concurrent.futures.ThreadPoolExecutor(len(possible_peers)) as executor_pool:
                 for candidate in possible_peers:
-                    executor_pool.submit(self.send_message, candidate, MessageType.hello)
+                    if candidate != self.whoami["ip"]:
+                        executor_pool.submit(self.send_message, candidate, MessageType.hello)
                 executor_pool.shutdown(wait=True)
 
     def send_message(self, ip:str, type:MessageType, content: str = None, port: int = PORT):
@@ -166,6 +166,7 @@ class Netchat:
                 s.close()
                 logging.info(f"Closed the connection on {ip}")
         except Exception as e:
+            
             logging.error(f"Error while sending the message. Reason: {e}")
 
     def process_message(self, data: str, ip: str):
