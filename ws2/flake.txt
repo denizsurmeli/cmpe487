@@ -1,0 +1,1 @@
+- use nmap to scan available ports and hosts

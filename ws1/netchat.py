@@ -12,25 +12,19 @@ PORT = 12345
 HELLO_MESSAGE = {
     "type":"hello",
     "ip":None,
-    "name":None
+    "myname":None
 }
 
-ACK_MESSAGE = {
+AS_MESSAGE = {
     "type": "aleykumselam",
     "ip":None,
-    "name":None
+    "myname":None
 }
 
 MESSAGE = {
     "type": "message",
     "ip":None,
     "content":None
-}
-
-LEAVE_MESSAGE = {
-    "type": "byebye",
-    "ip":None,
-    "name":None
 }
 
 
@@ -43,7 +37,7 @@ class Netchat:
         logging.info(f"Hostname: {hostname} IP: {ipaddress}")
 
         self.whoami: dict = {}
-        self.whoami['name'] = name if name is not None else hostname
+        self.whoami['myname'] = name if name is not None else hostname
         self.whoami['ip'] = ipaddress
 
         self.peers: dict = {}
@@ -78,7 +72,7 @@ class Netchat:
         while not self.kill_all:
             line = input()
             if line == ":whoami":
-                print(f"IP:{self.whoami['ip']}\tName:{self.whoami['name']}")
+                print(f"IP:{self.whoami['ip']}\tName:{self.whoami['myname']}")
 
             if line == ":quit":
                 self.shutdown()
@@ -96,7 +90,7 @@ class Netchat:
                     ip = name.strip()
                     hello_message = HELLO_MESSAGE.copy()
                     hello_message['ip'] = self.whoami['ip']
-                    hello_message['name'] = self.whoami['name']
+                    hello_message['myname'] = self.whoami['myname']
                     self.send_message(hello_message, ip)
                 except:
                     print("Invalid command. Usage: :hello ip")
@@ -123,7 +117,7 @@ class Netchat:
     def shutdown(self):
         byebye_message = LEAVE_MESSAGE.copy()
         byebye_message['ip'] = self.whoami['ip']
-        byebye_message['name'] = self.whoami['name']
+        byebye_message['myname'] = self.whoami['myname']
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
             for peer in self.peers:
@@ -133,7 +127,7 @@ class Netchat:
     def discover_peers(self):
         hello_message = HELLO_MESSAGE.copy()
         hello_message['ip'] = self.whoami['ip'] 
-        hello_message['name'] = self.whoami['name']
+        hello_message['myname'] = self.whoami['myname']
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
             for i in range(1,255):
@@ -165,14 +159,14 @@ class Netchat:
         try:
             message: json = json.loads(message)
             if message['type'] == 'hello':
-                logging.info(f"Peer reached, sending ACK. ip: {message['ip']} name: {message['name']}")
+                logging.info(f"Peer reached, sending ACK. ip: {message['ip']} name: {message['myname']}")
 
                 ack = ACK_MESSAGE.copy()
                 ack['ip'] = self.whoami['ip']
-                ack['name'] = self.whoami['name']
+                ack['myname'] = self.whoami['myname']
 
                 self.send_message(ack, ip=message['ip'])
-                self.add_peer(message['ip'], message['name'], self.dict_lock)
+                self.add_peer(message['ip'], message['myname'], self.dict_lock)
             
             if message['type'] == 'message':
                 _ip = message['ip']
@@ -182,12 +176,12 @@ class Netchat:
                 print(f"[{datetime.datetime.now()}] | FROM: {_from}({_ip}): {_content}")
 
             if message['type'] == 'aleykumselam':
-                logging.info(f"Peer found. ip: {message['ip']} name: {message['name']} ")
-                self.add_peer(message['ip'], message['name'], self.dict_lock)
+                logging.info(f"Peer found. ip: {message['ip']} name: {message['myname']} ")
+                self.add_peer(message['ip'], message['myname'], self.dict_lock)
             
             # this is not in the spec but it's a nice touchup
             if message['type'] == 'byebye':
-                logging.info(f"Peer left. ip: {message['ip']} name: {message['name']}")
+                logging.info(f"Peer left. ip: {message['ip']} name: {message['myname']}")
                 self.peers.pop(message['ip']) 
             
         except Exception as e:
