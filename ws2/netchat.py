@@ -7,6 +7,7 @@ import subprocess
 import re
 import concurrent.futures
 import threading
+import errno
 
 PORT = 12345
 
@@ -27,6 +28,7 @@ MESSAGE = {
 
 IP_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 
+# TODO :Find a way of closing the self-listener thread. 
 
 class MessageType(enum.Enum):
     hello = 1
@@ -48,12 +50,12 @@ class Netchat:
 
         self.peers: dict = {}
         self.listener_threads: dict = {}
-
+        self.prune_list:list[str] = []
         possible_peers = self.discover_peers()
 
         for ip in possible_peers:
             self.listener_threads[ip] = threading.Thread(
-                target=self.listen_peer, args=(ip))
+                target=lambda: self.listen_peer(ip))
             logging.info(f"Starting the listener on {ip}")
             self.listener_threads[ip].start()
 
@@ -63,8 +65,13 @@ class Netchat:
         self.user_input_thread.start()
         self.user_input_thread.join()
 
+    def show_peers(self):
+        print("IP:\t\tName:")
+        for peer in self.peers:
+            print(f"{peer}\t{self.peers[peer]}")
+
     def get_ip_by_name(self, name: str):
-        for peer, _ in self.peers:
+        for peer in self.peers.keys():
             if self.peers[peer] == name:
                 return peer
         return None
@@ -72,24 +79,24 @@ class Netchat:
     def shutdown(self):
         logging.info("Terminating...")
         self.terminate = True
-        for ip, thread in self.listener_threads:
-            thread.join()
+        print(self.listener_threads)
+        for ip in self.listener_threads.keys():
+            self.listener_threads[ip].join()
             logging.info(f"{ip} listener closed.")
 
+        self.listener_threads[self.whoami["ip"]].join()
+
     def listen_user(self):
-        while True:
+        while True and not self.terminate:
             line = input()
             if line == ":whoami":
                 print(f'IP:{self.whoami["ip"]}\tName:{self.whoami["myname"]}')
 
             if line == ":quit":
                 self.shutdown()
-                break
 
             if line == ":peers":
-                print("IP:\t\tName:")
-                for peer in self.peers:
-                    print(f"{peer}\t{self.peers[peer]}")
+                self.show_peers()
 
             if line.startswith(":hello"):
                 try:
@@ -112,14 +119,15 @@ class Netchat:
                     name, content = line.split(
                         " ", 2)[1], line.split(
                         " ", 2)[2]
-                    name, content = name.strip(), content.strip()
+                    name = name.strip()
+                    content = content.strip()
                     ip = self.get_ip_by_name(name)
                     if ip is None:
                         print(f"Peer with name \"{name}\" not found.")
                     else:
                         self.send_message(
                             ip, MessageType.message, content=content)
-                except BaseException:
+                except BaseException as e:
                     print("Invalid command. Usage: :send name message")
 
     def discover_peers(self, port: int = PORT) -> dict:
@@ -133,7 +141,7 @@ class Netchat:
         process = subprocess.run(syscall, stdout=subprocess.PIPE)
         possible_peers = re.findall(IP_PATTERN, str(process.stdout))
 
-        return possible_peers
+        return [str(peer) for peer in possible_peers]
 
     def join_network(self, possible_peers: list[str]):
         if len(possible_peers) == 0:
@@ -159,21 +167,22 @@ class Netchat:
                 s.connect((ip, port))
 
                 logging.info("Preparing the message.")
-                if type == MessageType.hello or type == MessageType.aleykumselam:
+                if type == MessageType.hello:
                     message = HELLO_MESSAGE.copy()
                     message["myname"] = self.whoami["myname"]
-
+                if type == MessageType.aleykumselam:
+                    message = AS_MESSAGE.copy()
+                    message["myname"] = self.whoami["myname"]
                 if type == MessageType.message:
                     message = MESSAGE.copy()
                     message["content"] = content
 
-                encode = json.dumps(message).encode('ascii')
+                encode = json.dumps(message).encode('utf-8')
                 s.sendall(encode)
                 logging.info("Sent the message")
                 s.close()
                 logging.info(f"Closed the connection on {ip}")
         except Exception as e:
-
             logging.error(f"Error while sending the message. Reason: {e}")
 
     def process_message(self, data: str, ip: str):
@@ -184,6 +193,9 @@ class Netchat:
                 self.peers[ip] = data["myname"]
                 logging.info(f"Sending 'aleykumselam' to {ip}")
                 self.send_message(ip, MessageType.aleykumselam)
+                self.listener_threads[ip] = threading.Thread(
+                    target=lambda: self.listen_peer(ip))
+                self.listener_threads[ip].start()
 
             if data["type"] == AS_MESSAGE["type"]:
                 logging.info(f"{ip} said 'aleykumselam'")
@@ -191,12 +203,12 @@ class Netchat:
 
             if data["type"] == MESSAGE["type"]:
                 logging.info(
-                    f"Processing message from {self.whoami[ip]}({ip})")
+                    f"Processing message from {self.peers[ip]}({ip})")
                 _content = data['content']
                 _from = 'UNKNOWN_HOST' if ip not in self.peers.keys(
                 ) else self.peers[ip]
                 print(
-                    f"[{datetime.datetime.now()}] | FROM: {_from}({ip}): {_content}")
+                    f"[{datetime.datetime.now()}] FROM: {_from}({ip}): {_content}")
         except KeyError as e:
             logging.error(
                 f"Incoming message with unexpected structure. Message: {data}")
@@ -204,36 +216,32 @@ class Netchat:
             logging.error(f"Unexpected error. Check the exception: {e}")
 
     def listen_peer(self, ip: str, port: int = PORT):
-        # TODO: add error handling here, definetly it will break
-        # TODO: add some checks whether the host still has port, or even host
-        # is alive
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind((ip, port))
                 s.listen()
                 while True and not self.terminate:
                     conn, addr = s.accept()
+                    addr = addr[0]
                     with conn:
                         while True:
-                            # TODO: draining here, find a way of better
-                            # communication
                             data = conn.recv(1024)
                             if not data:
                                 break
-                            data = str(data)  # deserialize here
+                            data = data.decode('utf-8')
                             self.process_message(data, addr)
                 if self.terminate:
                     logging.info(f"Closed the connection on {ip}")
                     s.close()
-            except OSError as os_error:
-                if os_error.errno == 61:
-                    logging.error(
-                        "The port is closed on the peer. Dropping the peer from book")
-                    self.peers.pop(addr)
-
+            except socket.error as e:
+                if e.errno == errno.EADDRNOTAVAIL:
+                    logging.info(f"Host not available")
+                if e.errno == errno.ECONNREFUSED or 'Connection refused' in str(e):
+                    logging.info(f"Host refused to connect")
+                        # if addr in self.peers.keys():
+                        #     self.peers.pop(addr)
+                
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    # chat = Netchat('deniz')
-    # chat.discover_peers()
-    # chat.send_message(chat.whoami['ip'], MessageType.hello)
+    netchat = Netchat()
