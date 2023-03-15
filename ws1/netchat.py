@@ -129,7 +129,7 @@ class Netchat:
         hello_message['ip'] = self.whoami['ip'] 
         hello_message['myname'] = self.whoami['myname']
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=256) as executor:
             for i in range(1,255):
                 # don't send to yourself
                 if i == int(self.whoami['ip'].split('.')[-1]):
