@@ -27,8 +27,8 @@ MESSAGE = {
 }
 
 IP_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
-BROADCAST_PERIOD = 30
-PRUNING_PERIOD = 60
+BROADCAST_PERIOD = 60
+PRUNING_PERIOD = 120
 
 # TODO :Find a way of closing the self-listener thread.
 
@@ -254,4 +254,4 @@ class Netchat:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    netchat = Netchat()
+    netchat = Netchat("Deniz")
