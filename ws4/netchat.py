@@ -28,10 +28,23 @@ MESSAGE = {
     "content": None
 }
 
+SYN_MESSAGE = {
+    "type": "syn",
+    "name": None,
+    "size": None
+}
+
+ACK_MESSAGE = {
+    "type": "5",
+    "seq": None,
+    "rwnd": None,
+}
+
 IP_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 BROADCAST_PERIOD = 60
 PRUNING_PERIOD = 120
 BATCH_SIZE = 1500 # bytes
+RWND = 10
 
 # TODO :Find a way of closing the self-listener thread.
 
@@ -41,6 +54,9 @@ class MessageType(enum.Enum):
     aleykumselam = 2
     message = 3
     file = 4
+    ack = 5
+    syn = 6
+
 
 
 class Netchat:
@@ -62,6 +78,7 @@ class Netchat:
         self.peers: dict = {}
         self.listener_threads: dict = {}
         self.prune_list: list[str] = []
+        self.messages: dict = {}
 
         self.listener_threads["BROADCAST"] = threading.Thread(
             target=self.listen_broadcast, daemon=True).start()
@@ -123,14 +140,21 @@ class Netchat:
                     print("Invalid command. Usage: :hello ip")
 
             if line.startswith(":send_file"):
-                # flow it baby
                 try:
                     name, filepath = line.split(
                         " ", 2)[1], line.split(
                         " ", 2)[2]
                     name = name.strip()
+
+                    logging.info(f"Collecting metadata and sending SYN to {ip}")
                     filepath = filepath.strip()
+                    with open(filepath, "rb") as f:
+                        size = os.stat(filepath).st_size
+                    content = f"{filepath},{size}"
                     ip = self.get_ip_by_name(name)
+
+                    self.send_message(ip, MessageType.syn, content=content)
+
                     self.send_file(ip, filepath, MessageType.file)
                 except BaseException as e:
                     logging.error(e)
@@ -186,29 +210,47 @@ class Netchat:
             print(e)
 
     def send_message(self, ip: str, type: MessageType,
-                     content: str = None, port: int = PORT):
+                     content: str = None, 
+                     port: int = PORT, 
+                     protocol = socket.SOCK_STREAM):
         try:
             logging.info("Creating a socket")
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                logging.info(f"Connecting to the {ip} on {port}")
+            with socket.socket(socket.AF_INET, protocol) as s:
+                logging.info(f"Connecting to the {ip} on {port} using {protocol}")
                 s.connect((ip, port))
-
                 logging.info("Preparing the message.")
                 if type == MessageType.hello:
+                    logging.info(f"Sending [hello] message to {ip}")
                     message = HELLO_MESSAGE.copy()
                     message["myname"] = self.whoami["myname"]
                 if type == MessageType.aleykumselam:
+                    logging.info(f"Sending [aleykumselam] message to {ip}")
                     message = AS_MESSAGE.copy()
                     message["myname"] = self.whoami["myname"]
                 if type == MessageType.message:
+                    logging.info(f"Sending [message] message to {ip}")
                     message = MESSAGE.copy()
                     message["content"] = content
+                if type == MessageType.syn:
+                    logging.info(f"Sending [syn] message to {ip}")
+                    parameters = content.split(",")
+                    message = SYN_MESSAGE.copy()
+                    message["name"] = parameters[0]
+                    message["size"] = int(parameters[1])
+                if type == MessageType.ack:
+                    logging.info(f"Sending [ack] message to {ip}")
+                    message = ACK_MESSAGE.copy()
+                    parameters = content.split(",")
+                    message["seq"] = int(parameters[0])
+                    message["rwnd"] = int(parameters[1])
+
 
                 encode = json.dumps(message).encode('utf-8')
                 s.sendall(encode)
                 logging.info("Sent the message")
                 s.close()
                 logging.info(f"Closed the connection on {ip}")
+
         except Exception as e:
             logging.error(f"Error while sending the message. Reason: {e}")
 
@@ -218,7 +260,7 @@ class Netchat:
             if data["type"] == HELLO_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} reached to say 'hello'")
                 self.peers[ip] = (time.time(), data["myname"])
-                
+
                 # TODO: refactor this mess 
                 self.listener_threads[ip] = [threading.Thread(
                     target=lambda: self.listen_peer(ip))]
@@ -243,6 +285,10 @@ class Netchat:
                 ) else self.peers[ip][1]
                 print(
                     f"[{datetime.datetime.now()}] FROM: {_from}({ip}): {_content}")
+            # if data["type"] == SYN["type"]:
+
+            # if data["type"] == ACK["type"]:
+
         except KeyError as e:
             logging.error(
                 f"Incoming message with unexpected structure. Message: {data}")
