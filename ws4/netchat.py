@@ -209,30 +209,41 @@ class Netchat:
         except Exception as e:
             logging.error(f"Unexpected error. Check the exception: {e}")
 
-    def listen_peer(self, ip: str, port: int = PORT):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((ip, port))
-                s.listen()
-                while True and not self.terminate:
-                    conn, addr = s.accept()
-                    addr = addr[0]
-                    with conn:
-                        while True:
-                            data = conn.recv(1024)
-                            if not data:
-                                break
-                            data = data.decode('utf-8')
-                            self.process_message(data, addr)
-                if self.terminate:
-                    logging.info(f"Closed the connection on {ip}")
-                    s.close()
-            except socket.error as e:
-                if e.errno == errno.EADDRNOTAVAIL:
-                    logging.info(f"Host not available")
-                if e.errno == errno.ECONNREFUSED or 'Connection refused' in str(
-                        e):
-                    logging.info(f"Host refused to connect")
+    def listen_peer(self, ip: str, protocol = socket.SOCKET_STREAM, port: int = PORT):
+        if protocol == socket.SOCK_STREAM:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind((ip, port))
+                    s.listen()
+                    while True and not self.terminate:
+                        conn, addr = s.accept()
+                        addr = addr[0]
+                        with conn:
+                            while True:
+                                data = conn.recv(1024)
+                                if not data:
+                                    break
+                                data = data.decode('utf-8')
+                                self.process_message(data, addr)
+                    if self.terminate:
+                        logging.info(f"Closed the connection on {ip}")
+                        s.close()
+                except socket.error as e:
+                    if e.errno == errno.EADDRNOTAVAIL:
+                        logging.info(f"Host not available")
+                    if e.errno == errno.ECONNREFUSED or 'Connection refused' in str(
+                            e):
+                        logging.info(f"Host refused to connect")
+        elif protocol == socket.SOCK_DGRAM:
+            while True and not self.terminate:
+                buffer_size = 1024
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.bind((ip, port))
+                    s.setblocking(0)
+                    result = select.select([s], [], [])
+                    msg, sender = result[0][0].recvfrom(buffer_size)
+                    sender = sender[0]
+                    self.process_message(msg, sender)
 
     def listen_broadcast(self, port=PORT):
         while True and not self.terminate:
