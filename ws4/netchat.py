@@ -107,10 +107,9 @@ class RecvCtx:
         Context manager for receiving a file over UDP.
         This context has no on-fly packets, since ACKs are sent via TCP.
     """
-    def __init__(self, filepath, ip, batch_size = BATCH_SIZE):
+    def __init__(self, filepath, ip):
         self.filepath = filepath
         self.ip = ip
-        self.batch_size = batch_size
 
         self.packet_count = None
         self.seq = 1
