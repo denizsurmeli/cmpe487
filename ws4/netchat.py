@@ -9,7 +9,8 @@ import threading
 import errno
 import time
 import os
-
+import traceback
+import base64
 
 PORT = 12345
 
@@ -82,24 +83,18 @@ class SendCtx:
         with open(self.filepath, "rb") as file:
             # divide into batch size packets and store in self.packets
             while ( batch := file.read(self.batch_size) ):
-                self.packets.append(batch)
+                self.packets.append(base64.b64encode(batch))
 
     def build_message(self, seq):
-        if seq == 0:
-            message = FILE_MESSAGE.copy()
-            message["name"] = self.filepath
-            message["seq"] = seq
-            message["body"] = self.packet_count
-            return message
-        
         message = FILE_MESSAGE.copy()
         message["name"] = self.filepath
         message["seq"] = seq
-        message["body"] = self.packets[seq - 1]
+        message["body"] = self.packets[seq - 1].decode("utf-8") if seq != 0 else self.packet_count
+    
         return message
     
     def get_next_message(self):
-        if self.seq == self.packet_count - 1:
+        if self.seq >= self.packet_count - 1 and len(self.on_fly) >= self.rwnd:
             return None
 
         self.on_fly.append((time.time(), self.seq))
@@ -122,6 +117,32 @@ class SendCtx:
     def is_open_to_send(self):
         return len(self.on_fly) < self.rwnd and not self.is_complete()
     
+
+    def handle_on_fly(self, executor):
+        for i in range(len(self.on_fly)):
+            packet = self.on_fly[i]
+            if time.time() - packet[0] > PACKET_TIMEOUT:
+                logging.info(f"[SendCtxExecutor] Resending packet {packet[1]}")
+                executor.send_message(self.ip, MessageType.file, content=self.build_message(packet[1]), override=True, protocol=socket.SOCK_DGRAM)
+                self.on_fly[i] = (time.time(), packet[1])
+
+    def execute(self, seq, rwnd, executor):
+        # ack the seq
+        logging.info(f"[SendCtxExecutor] ACK: {seq}, RWND: {rwnd}")
+        self.rwnd = rwnd
+        self.ack(seq)
+        logging.info(f"[SendCtxExecutor] ACKED: {self.acked} ON_FLY: {self.on_fly} RWND: {self.rwnd}")
+        while self.is_open_to_send():
+            message = self.get_next_message()
+            if message:
+                executor.send_message(self.ip, MessageType.file, content=message, override=True, protocol=socket.SOCK_DGRAM)
+            else:
+                break
+        # resend timed out packets
+        self.handle_on_fly(executor)
+        # check if all packets are acked
+        return len(self.acked) == self.packet_count
+    
 class RecvCtx:
     """
         Context manager for receiving a file over UDP.
@@ -142,14 +163,9 @@ class RecvCtx:
         message["name"] = self.filepath
         message["seq"] = seq
         message["rwnd"] = self.packet_count - len(self.acked)
-        return message
-    
-    def get_next_message(self):
-        if self.seq == self.packet_count - 1:
-            return None
 
-        self.seq += 1
-        return self.build_message(self.seq - 1)
+        return message
+
 
     def add_packet(self, packet):
         is_duplicate = False
@@ -161,7 +177,7 @@ class RecvCtx:
             self.packets.append(packet)
 
     def is_complete(self):
-        return self.seq == self.packet_count - 1
+        return self.seq == self.packet_count
 
     def build_file(self):
         self.packets.sort(key=lambda x: x["seq"])
@@ -181,6 +197,19 @@ class RecvCtx:
         with open(self.filepath, "wb") as file:
             for packet in self.packets:
                 file.write(packet)
+
+    def execute(self,  data, executor):
+        logging.info(f"[RecvCtxExecutor] ACK: {data['seq']}")
+        self.add_packet(data)
+        self.acked.append(data["seq"])
+        logging.info(f"[RecvCtxExecutor] ACKED: {self.acked} rate: {len(self.acked) / self.packet_count}")
+        message = self.build_message(data["seq"])
+        executor.send_message(self.ip, MessageType.ack, content=message, override=True, protocol=socket.SOCK_STREAM)
+
+        if self.is_complete():
+            self.save()
+            return True
+        return False
 
 class Netchat:
     def __init__(self, name: str = None):
@@ -215,9 +244,12 @@ class Netchat:
             target=self.broadcast, daemon=True).start()
 
         print(f"Discovery completed, ready to chat.")
+
         self.user_input_thread = threading.Thread(target=self.listen_user)
+        self.send_ctx_manager_thread = threading.Thread(target=lambda : self.send_ctx_manager(self))
         self.user_input_thread.start()
         self.user_input_thread.join()
+        self.send_ctx_manager_thread.join()
 
     def show_peers(self):
         print("IP:\t\tName:")
@@ -235,8 +267,9 @@ class Netchat:
         self.terminate = True
         for ip in self.listener_threads.keys():
             if ip not in [self.whoami["ip"], "BROADCAST"]:
-                self.listener_threads[ip].join()
-                logging.info(f"{ip} listener closed.")
+                for t in self.listener_threads[ip]:
+                    t.join()
+                logging.info(f"{ip} listener(s) closed.")
 
     def listen_user(self):
         while True and not self.terminate:
@@ -276,10 +309,13 @@ class Netchat:
                     if ip is None:
                         print(f"Peer with name \"{name}\" not found.")
                     else:
+                        logging.info(f"Sending file {filename} to {name}.")
                         if ip not in self.send_ctxs:
+                            logging.info(f"Creating new send context for {ip}.")
                             self.send_ctxs[ip] = {}
                         self.send_ctxs[ip][filename] = SendCtx(filename, ip)
                         message = self.send_ctxs[ip][filename].build_message(0)
+                        logging.info(f"Sending first packet of {filename}. Message: {message}")
                         self.send_message(
                             ip, 
                             MessageType.file, 
@@ -291,7 +327,7 @@ class Netchat:
                     # TODO: Add handling
                     print(e)
 
-            if line.startswith(":send"):
+            elif line.startswith(":send"):
                 try:
                     # strip command from the second empty spaace and keep the
                     # rest as content
@@ -323,21 +359,15 @@ class Netchat:
                         'utf-8'), ('<broadcast>', port))
                 logging.info("Done.")
                 
-    def file_transfer_daemon(self):
-        while True and not self.terminate:
-            for ip in self.send_ctxs:
-                for filename in self.send_ctxs[ip]:
-                    ctx = self.send_ctxs[ip][filename]
-                    if not ctx.is_complete():
-                        for packet in ctx.on_fly:
-                            if packet[0] + PACKET_TIMEOUT < time.time():
-                                self.send_message(ip, MessageType.file_transfer, content=packet[1], override=True, protocol=socket.SOCK_DGRAM)
-                        if ctx.is_open_to_send():
-                            message = ctx.get_next_message()
-                            self.send_message(ip, MessageType.file_transfer, content=message, override=True, protocol=socket.SOCK_DGRAM)
-                    else:
-                        del self.send_ctxs[ip][filename]
-                        print(f"File {filename} sent to {ip}.")
+    # def file_transfer_daemon(self):
+    #     while True and not self.terminate:
+    #         for ip in self.send_ctxs:
+    #             for filename in self.send_ctxs[ip]:
+    #                 ctx = self.send_ctxs[ip][filename]
+    #                 state = ctx.execute(executor=self)
+    #                 if state == True:
+    #                     del self.send_ctxs[ip][filename]
+    #                     print(f"File {filename} sent to {ip}.")
 
     def send_message(self, 
                      ip: str, 
@@ -364,6 +394,8 @@ class Netchat:
                     if type == MessageType.message:
                         message = MESSAGE.copy()
                         message["content"] = content
+                    if type == MessageType.ack:
+                        message = content # it's overriden we know
 
                     encode = json.dumps(message).encode('utf-8')
                     s.sendall(encode)
@@ -371,27 +403,35 @@ class Netchat:
                     s.close()
                     logging.info(f"Closed the connection on {ip}")
             except Exception as e:
-                logging.error(f"Error while sending the message. Reason: {e}")
+                logging.error(f"Error while sending the message. Reason: {type, content, e}")
         elif protocol == socket.SOCK_DGRAM:
             try:
                 logging.info("Creating a socket")
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                     logging.info(f"Connecting to the {ip} on {port}")
-
                     logging.info("Preparing the message.")
-                    if message["type"] == FILE_MESSAGE["type"] and override:
-                        # only message that should go through UDP
-                        message = content
-                    encode = json.dumps(message).encode('utf-8')
+                    # the only message is file, so no need to check the type
+                    encode = json.dumps(content).encode('utf-8')
                     s.sendto(encode, (ip, port))
                     logging.info("Sent the message")
                     s.close()
                     logging.info(f"Closed the connection on {ip}")
             except Exception as e:
-                logging.error(f"Error while sending the message. Reason: {e}")
-
+                logging.error(f"Error while sending the file. Reason: {type, content, e}")
+    
+    def send_ctx_manager(self,executor):
+        while True and not self.terminate:
+            time.sleep(0.5) # 1 sec timeout, poll every 0.5
+            for ip in self.send_ctxs:
+                for filename in self.send_ctxs[ip]:
+                    ctx = self.send_ctxs[ip][filename]
+                    ctx.handle_on_fly(executor)
+                
     def process_message(self, data: str, ip: str):
-        data = json.loads(data)
+        try:
+            data = json.loads(data)
+        except Exception as e:
+            print(f"Error while parsing the message. Reason: {data, traceback.format_exc()}")
         try:
             if data["type"] == HELLO_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} reached to say 'hello'")
@@ -420,44 +460,43 @@ class Netchat:
                 
             if data["type"] == ACK_MESSAGE["type"]:
                 logging.info(
-                    f"Processing ACK from {self.peers[ip]}({ip})")
+                    f"Processing ACK from {self.peers[ip]}({ip}) for {data['name']}")
                 _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
                 ) else self.peers[ip][1]
+                ## DAEMON WILL HANDLE THIS
                 send_ctx = self.send_ctxs[ip][data["name"]]
-                send_ctx.rwnd = int(data["rwnd"])
-                if send_ctx.is_complete():
+                state = send_ctx.execute(seq=data["seq"], rwnd = int(data["rwnd"]), executor=self)
+                if state == True:
+                    logging.info(f"{data['file']} sent to {ip}")
                     self.send_ctxs[ip][data["name"]] = None
-                    logging.info("File sent.")
-                else:
-                    send_ctx.ack(int(data["seq"]))
-                    logging.info(f"FROM:{_sender}(ACK[{data['seq']}]): <{data['name']} received.>")
                     
 
             if data["type"] == FILE_MESSAGE["type"]:
                 logging.info(
-                    f"Processing file from {self.peers[ip]}({ip})")
+                    f"Processing {data['name']} from {self.peers[ip][1]}({ip})")
                 _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
                 ) else self.peers[ip][1]
-
-                if data["name"] not in self.recv_ctxs[ip].keys():
-                    self.recv_ctxs[ip][data["name"]] = RecvCtx(data["name"], ip)
+                # lazy init
+                if ip not in self.recv_ctxs.keys():
+                    self.recv_ctxs[ip] = {}
                 if data["seq"] == 0:
-                    self.recv_ctxs[ip][data["name"]].packet_count = int(data["content"])
-                else:
-                    recv_ctx = self.recv_ctxs[ip][data["name"]]
-                    recv_ctx.add_packet(data)
-                    if recv_ctx.is_complete():
-                        logging.info(f"FROM:{_sender}(file): <{data['name']} received.>")
-                        recv_ctx.save()
-                        self.recv_ctxs[ip][data["name"]] = None
+                    packet_count = int(data["body"])
+                if data["name"] not in self.recv_ctxs[ip].keys():
+                    self.recv_ctxs[ip][data["name"]] = RecvCtx(data["name"], ip, packet_count)
+                recv_ctx = self.recv_ctxs[ip][data["name"]]
+                state = recv_ctx.execute(data=data, executor=self)
+                if state:
+                    logging.info(f"FROM:{_sender}(file): <{data['name']} received.>")
+                    recv_ctx.save()
+                    self.recv_ctxs[ip][data["name"]] = None
 
         except KeyError as e:
             logging.error(
-                f"Incoming message with unexpected structure. Message: {data}")
+                f"Incoming message with unexpected structure. Message: {e, data}")
         except Exception as e:
-            logging.error(f"Unexpected error. Check the exception: {e}")
+            logging.error(f"Unexpected error. Check the exception: {traceback.format_exc()}")
 
-    def listen_peer(self, ip: str, protocol = socket.SOCKET_STREAM, port: int = PORT):
+    def listen_peer(self, ip: str, protocol = socket.SOCK_STREAM, port: int = PORT):
         if protocol == socket.SOCK_STREAM:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:
@@ -468,7 +507,7 @@ class Netchat:
                         addr = addr[0]
                         with conn:
                             while True:
-                                data = conn.recv(1024)
+                                data = conn.recv(16384)
                                 if not data:
                                     break
                                 data = data.decode('utf-8')
@@ -482,26 +521,27 @@ class Netchat:
                     if e.errno == errno.ECONNREFUSED or 'Connection refused' in str(
                             e):
                         logging.info(f"Host refused to connect")
-        elif protocol == socket.SOCK_DGRAM:
-            while True and not self.terminate:
-                buffer_size = 1024
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                    s.bind((ip, port))
-                    s.setblocking(0)
-                    result = select.select([s], [], [])
-                    msg, sender = result[0][0].recvfrom(buffer_size)
-                    sender = sender[0]
-                    self.process_message(msg, sender)
+        # elif protocol == socket.SOCK_DGRAM:
+        #     while True and not self.terminate:
+        #         buffer_size = 1024
+        #         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        #             s.bind((ip, port))
+        #             s.setblocking(0)
+        #             result = select.select([s], [], [])
+        #             msg, sender = result[0][0].recvfrom(buffer_size)
+        #             sender = sender[0]
+        #             self.process_message(msg, sender)
 
     def listen_broadcast(self, port=PORT):
         while True and not self.terminate:
-            buffer_size = 1024
+            buffer_size = 16384 # lmao this took 4 hours to figure out
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.bind(('', port))
                 s.setblocking(0)
                 result = select.select([s], [], [])
                 msg, sender = result[0][0].recvfrom(buffer_size)
                 sender = sender[0]
+                msg = msg.decode('utf-8')
                 self.process_message(msg, sender)
 
                 for peer in list(self.peers.keys()):
