@@ -8,6 +8,8 @@ import re
 import threading
 import errno
 import time
+import os
+
 
 PORT = 12345
 
@@ -26,9 +28,25 @@ MESSAGE = {
     "content": None
 }
 
+FILE_MESSAGE = {
+    "type": 4,
+    "name": None,
+    "seq": None,
+    "body":None
+}
+
+ACK_MESSAGE = {
+    "type": 5,
+    "name": None,
+    "seq": None,
+    "rwnd":None
+}
+
+
 IP_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 BROADCAST_PERIOD = 60
 PRUNING_PERIOD = 120
+BATCH_SIZE = 1500 # bytes
 
 # TODO :Find a way of closing the self-listener thread.
 
@@ -38,6 +56,92 @@ class MessageType(enum.Enum):
     aleykumselam = 2
     message = 3
 
+
+
+class SendCtx: 
+    """
+        Context manager for sending a file over UDP.
+    """
+    def __init__(self, filepath, ip, batch_size = BATCH_SIZE):
+        self.filepath = filepath
+        self.ip = ip
+        self.filesize = os.stat(filepath).st_size
+        self.batch_size = batch_size
+
+        self.packet_count = self.filesize // self.batch_size if self.filesize % self.batch_size == 0 else self.filesize // self.batch_size + 1
+        self.seq = 1
+
+        self.packets = []
+        self.acked = []
+        self.on_fly = []
+
+        with open(self.filepath, "rb") as file:
+            # divide into batch size packets and store in self.packets
+            while ( batch := file.read(self.batch_size) ):
+                self.packets.append(batch)
+
+    def build_message(self, seq):
+        message = FILE_MESSAGE.copy()
+        message["name"] = self.filepath
+        message["seq"] = seq
+        message["body"] = self.packets[seq - 1]
+        return message
+    
+    def get_next_message(self):
+        if self.seq == self.packet_count - 1:
+            return None
+
+        self.on_fly.append((time.time(), self.seq))
+        self.seq += 1
+        return self.build_message(self.seq - 1)
+
+    def is_complete(self):
+        return self.seq == self.packet_count - 1
+    
+    def ack(self, seq):
+        self.acked.append(seq)
+        self.on_fly = [x for x in self.on_fly if x[1] != seq]
+    
+class RecvCtx:
+    """
+        Context manager for receiving a file over UDP.
+        This context has no on-fly packets, since ACKs are sent via TCP.
+    """
+    def __init__(self, filepath, ip, batch_size = BATCH_SIZE):
+        self.filepath = filepath
+        self.ip = ip
+        self.batch_size = batch_size
+
+        self.packet_count = None
+        self.seq = 1
+
+        self.packets = []
+        self.acked = []
+
+    def build_message(self, seq):
+        message = ACK_MESSAGE.copy()
+        message["name"] = self.filepath
+        message["seq"] = seq
+        message["rwnd"] = self.packet_count - len(self.acked)
+        return message
+    
+    def get_next_message(self):
+        if self.seq == self.packet_count - 1:
+            return None
+
+        self.seq += 1
+        return self.build_message(self.seq - 1)
+
+    def add_packet(self, packet):
+        self.packets.append(packet)
+
+    def is_complete(self):
+        return self.seq == self.packet_count - 1
+    
+    def write_to_file(self):
+        with open(self.filepath, "wb") as file:
+            for packet in self.packets:
+                file.write(packet)
 
 class Netchat:
     def __init__(self, name: str = None):
