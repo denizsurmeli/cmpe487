@@ -47,7 +47,8 @@ IP_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 BROADCAST_PERIOD = 60
 PRUNING_PERIOD = 120
 BATCH_SIZE = 1500 # bytes
-
+RWND = 10
+PACKET_TIMEOUT = 1
 # TODO :Find a way of closing the self-listener thread.
 
 
@@ -55,6 +56,9 @@ class MessageType(enum.Enum):
     hello = 1
     aleykumselam = 2
     message = 3
+    file = 4
+    ack = 5
+
 
 
 
@@ -62,7 +66,7 @@ class SendCtx:
     """
         Context manager for sending a file over UDP.
     """
-    def __init__(self, filepath, ip, batch_size = BATCH_SIZE):
+    def __init__(self, filepath, ip, batch_size = BATCH_SIZE, rwnd = 1):
         self.filepath = filepath
         self.ip = ip
         self.filesize = os.stat(filepath).st_size
@@ -70,7 +74,7 @@ class SendCtx:
 
         self.packet_count = self.filesize // self.batch_size if self.filesize % self.batch_size == 0 else self.filesize // self.batch_size + 1
         self.seq = 1
-
+        self.rwnd = rwnd
         self.packets = []
         self.acked = []
         self.on_fly = []
@@ -81,6 +85,13 @@ class SendCtx:
                 self.packets.append(batch)
 
     def build_message(self, seq):
+        if seq == 0:
+            message = FILE_MESSAGE.copy()
+            message["name"] = self.filepath
+            message["seq"] = seq
+            message["body"] = self.packet_count
+            return message
+        
         message = FILE_MESSAGE.copy()
         message["name"] = self.filepath
         message["seq"] = seq
@@ -99,19 +110,28 @@ class SendCtx:
         return self.seq == self.packet_count - 1
     
     def ack(self, seq):
-        self.acked.append(seq)
+        is_acked_before = False
+        for s in self.acked:
+            if s == seq:
+                is_acked_before = True
+                break
+        if not is_acked_before:
+            self.acked.append(seq)
         self.on_fly = [x for x in self.on_fly if x[1] != seq]
+    
+    def is_open_to_send(self):
+        return len(self.on_fly) < self.rwnd and not self.is_complete()
     
 class RecvCtx:
     """
         Context manager for receiving a file over UDP.
         This context has no on-fly packets, since ACKs are sent via TCP.
     """
-    def __init__(self, filepath, ip):
+    def __init__(self, filepath, ip, packet_count):
         self.filepath = filepath
         self.ip = ip
 
-        self.packet_count = None
+        self.packet_count = packet_count
         self.seq = 1
 
         self.packets = []
@@ -132,11 +152,31 @@ class RecvCtx:
         return self.build_message(self.seq - 1)
 
     def add_packet(self, packet):
-        self.packets.append(packet)
+        is_duplicate = False
+        for p in self.packets:
+            if p["seq"] == packet["seq"]:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            self.packets.append(packet)
 
     def is_complete(self):
         return self.seq == self.packet_count - 1
+
+    def build_file(self):
+        self.packets.sort(key=lambda x: x["seq"])
+        self.write_to_file()
+        return self.filepath
     
+    def write_to_file(self):
+        with open(self.filepath, "wb") as file:
+            for packet in self.packets:
+                file.write(packet["body"])
+
+    def save(self):
+        self.build_file()
+        self.write_to_file()
+
     def write_to_file(self):
         with open(self.filepath, "wb") as file:
             for packet in self.packets:
@@ -161,6 +201,9 @@ class Netchat:
         self.peers: dict = {}
         self.listener_threads: dict = {}
         self.prune_list: list[str] = []
+
+        self.send_ctxs : dict = {}
+        self.recv_ctxs : dict  = {}
 
         self.listener_threads["BROADCAST"] = threading.Thread(
             target=self.listen_broadcast, daemon=True).start()
@@ -220,6 +263,33 @@ class Netchat:
                         logging.warn("Incorrect IP string.")
                 except BaseException:
                     print("Invalid command. Usage: :hello ip")
+            if line.startswith(":send_file"):
+                try:
+                    # strip command from the second empty spaace and keep the
+                    # rest as content
+                    name, filename = line.split(
+                        " ", 2)[1], line.split(
+                        " ", 2)[2]
+                    name = name.strip()
+                    filename = filename.strip()
+                    ip = self.get_ip_by_name(name)
+                    if ip is None:
+                        print(f"Peer with name \"{name}\" not found.")
+                    else:
+                        if ip not in self.send_ctxs:
+                            self.send_ctxs[ip] = {}
+                        self.send_ctxs[ip][filename] = SendCtx(filename, ip)
+                        message = self.send_ctxs[ip][filename].build_message(0)
+                        self.send_message(
+                            ip, 
+                            MessageType.file, 
+                            content=message, 
+                            override=True,
+                            protocol=socket.SOCK_DGRAM
+                            )
+                except BaseException as e:
+                    # TODO: Add handling
+                    print(e)
 
             if line.startswith(":send"):
                 try:
@@ -240,8 +310,6 @@ class Netchat:
                     print("Invalid command. Usage: :send name message")
 
     def broadcast(self, port: int = PORT) -> dict:
-        # nmap this nmap that
-        # broadcast_address = ".".join(self.whoami['ip'].split('.')[:-1]) + ".255"
         while True:
             if time.time() - self.last_timestamp > BROADCAST_PERIOD:
                 logging.info("Broadcasting...")
@@ -254,33 +322,73 @@ class Netchat:
                     s.sendto(json.dumps(hello_message).encode(
                         'utf-8'), ('<broadcast>', port))
                 logging.info("Done.")
+                
+    def file_transfer_daemon(self):
+        while True and not self.terminate:
+            for ip in self.send_ctxs:
+                for filename in self.send_ctxs[ip]:
+                    ctx = self.send_ctxs[ip][filename]
+                    if not ctx.is_complete():
+                        for packet in ctx.on_fly:
+                            if packet[0] + PACKET_TIMEOUT < time.time():
+                                self.send_message(ip, MessageType.file_transfer, content=packet[1], override=True, protocol=socket.SOCK_DGRAM)
+                        if ctx.is_open_to_send():
+                            message = ctx.get_next_message()
+                            self.send_message(ip, MessageType.file_transfer, content=message, override=True, protocol=socket.SOCK_DGRAM)
+                    else:
+                        del self.send_ctxs[ip][filename]
+                        print(f"File {filename} sent to {ip}.")
 
-    def send_message(self, ip: str, type: MessageType,
-                     content: str = None, port: int = PORT):
-        try:
-            logging.info("Creating a socket")
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                logging.info(f"Connecting to the {ip} on {port}")
-                s.connect((ip, port))
+    def send_message(self, 
+                     ip: str, 
+                     type: MessageType,
+                     content = None, 
+                     override: bool = False,
+                     port: int = PORT,
+                    protocol = socket.SOCK_STREAM) -> None:
+        # TODO: Refactor this function
+        if protocol == socket.SOCK_STREAM:
+            try:
+                logging.info("Creating a socket")
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    logging.info(f"Connecting to the {ip} on {port}")
+                    s.connect((ip, port))
 
-                logging.info("Preparing the message.")
-                if type == MessageType.hello:
-                    message = HELLO_MESSAGE.copy()
-                    message["myname"] = self.whoami["myname"]
-                if type == MessageType.aleykumselam:
-                    message = AS_MESSAGE.copy()
-                    message["myname"] = self.whoami["myname"]
-                if type == MessageType.message:
-                    message = MESSAGE.copy()
-                    message["content"] = content
+                    logging.info("Preparing the message.")
+                    if type == MessageType.hello:
+                        message = HELLO_MESSAGE.copy()
+                        message["myname"] = self.whoami["myname"]
+                    if type == MessageType.aleykumselam:
+                        message = AS_MESSAGE.copy()
+                        message["myname"] = self.whoami["myname"]
+                    if type == MessageType.message:
+                        message = MESSAGE.copy()
+                        message["content"] = content
 
-                encode = json.dumps(message).encode('utf-8')
-                s.sendall(encode)
-                logging.info("Sent the message")
-                s.close()
-                logging.info(f"Closed the connection on {ip}")
-        except Exception as e:
-            logging.error(f"Error while sending the message. Reason: {e}")
+                    encode = json.dumps(message).encode('utf-8')
+                    s.sendall(encode)
+                    logging.info("Sent the message")
+                    s.close()
+                    logging.info(f"Closed the connection on {ip}")
+            except Exception as e:
+                logging.error(f"Error while sending the message. Reason: {e}")
+        elif protocol == socket.SOCK_DGRAM:
+            try:
+                logging.info("Creating a socket")
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    logging.info(f"Connecting to the {ip} on {port}")
+
+                    logging.info("Preparing the message.")
+                    if message["type"] == FILE_MESSAGE["type"] and override:
+                        # only message that should go through UDP
+                        message = content
+                    encode = json.dumps(message).encode('utf-8')
+                    s.sendto(encode, (ip, port))
+                    logging.info("Sent the message")
+                    s.close()
+                    logging.info(f"Closed the connection on {ip}")
+            except Exception as e:
+                logging.error(f"Error while sending the message. Reason: {e}")
 
     def process_message(self, data: str, ip: str):
         data = json.loads(data)
@@ -309,6 +417,40 @@ class Netchat:
                 ) else self.peers[ip][1]
                 print(
                     f"[{datetime.datetime.now()}] FROM: {_from}({ip}): {_content}")
+                
+            if data["type"] == ACK_MESSAGE["type"]:
+                logging.info(
+                    f"Processing ACK from {self.peers[ip]}({ip})")
+                _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
+                ) else self.peers[ip][1]
+                send_ctx = self.send_ctxs[ip][data["name"]]
+                send_ctx.rwnd = int(data["rwnd"])
+                if send_ctx.is_complete():
+                    self.send_ctxs[ip][data["name"]] = None
+                    logging.info("File sent.")
+                else:
+                    send_ctx.ack(int(data["seq"]))
+                    logging.info(f"FROM:{_sender}(ACK[{data['seq']}]): <{data['name']} received.>")
+                    
+
+            if data["type"] == FILE_MESSAGE["type"]:
+                logging.info(
+                    f"Processing file from {self.peers[ip]}({ip})")
+                _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
+                ) else self.peers[ip][1]
+
+                if data["name"] not in self.recv_ctxs[ip].keys():
+                    self.recv_ctxs[ip][data["name"]] = RecvCtx(data["name"], ip)
+                if data["seq"] == 0:
+                    self.recv_ctxs[ip][data["name"]].packet_count = int(data["content"])
+                else:
+                    recv_ctx = self.recv_ctxs[ip][data["name"]]
+                    recv_ctx.add_packet(data)
+                    if recv_ctx.is_complete():
+                        logging.info(f"FROM:{_sender}(file): <{data['name']} received.>")
+                        recv_ctx.save()
+                        self.recv_ctxs[ip][data["name"]] = None
+
         except KeyError as e:
             logging.error(
                 f"Incoming message with unexpected structure. Message: {data}")

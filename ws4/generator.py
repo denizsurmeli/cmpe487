@@ -12,4 +12,5 @@ def fill_file(filepath: str, size: int):
 
 
 if __name__ == '__main__':
-    fill_file('file.txt', 100000)
+    two_mb = 2 * 1024 * 1024 # 2 MB
+    fill_file('file.txt', two_mb)
