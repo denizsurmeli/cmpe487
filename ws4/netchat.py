@@ -185,9 +185,12 @@ class Netchat:
             if data["type"] == HELLO_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} reached to say 'hello'")
                 self.peers[ip] = (time.time(), data["myname"])
-                self.listener_threads[ip] = threading.Thread(
-                    target=lambda: self.listen_peer(ip))
-                self.listener_threads[ip].start()
+                self.listener_threads[ip] = [
+                    threading.Thread(target=lambda: self.listen_peer(ip)),
+                    threading.Thread(target=lambda: self.listen_peer(ip, protocol=socket.SOCK_DGRAM))
+                ]
+                self.listener_threads[ip][0].start()
+                self.listener_threads[ip][1].start()
                 logging.info(f"Sending 'aleykumselam' to {ip}")
                 self.send_message(ip, MessageType.aleykumselam)
 
