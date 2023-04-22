@@ -74,15 +74,16 @@ class SendCtx:
         self.batch_size = batch_size
 
         self.packet_count = self.filesize // self.batch_size if self.filesize % self.batch_size == 0 else self.filesize // self.batch_size + 1
-        self.seq = 1
+        self.seq = 0
         self.rwnd = rwnd
         self.packets = []
         self.acked = []
         self.on_fly = []
+        self.sent = []
 
         with open(self.filepath, "rb") as file:
             # divide into batch size packets and store in self.packets
-            while ( batch := file.read(self.batch_size) ):
+            while (batch := file.read(self.batch_size)):
                 self.packets.append(base64.b64encode(batch))
 
     def build_message(self, seq):
@@ -94,48 +95,50 @@ class SendCtx:
         return message
     
     def get_next_message(self):
-        if self.seq >= self.packet_count - 1 and len(self.on_fly) >= self.rwnd:
+        if self.seq >= self.packet_count or len(self.on_fly) > self.rwnd:
             return None
 
-        self.on_fly.append((time.time(), self.seq))
         self.seq += 1
+        self.on_fly.append((time.time(), self.seq))
         return self.build_message(self.seq - 1)
 
     def is_complete(self):
-        return self.seq == self.packet_count - 1
+        return len(self.on_fly) == 0 and len(self.acked) == self.packet_count
     
     def ack(self, seq):
-        is_acked_before = False
-        for s in self.acked:
-            if s == seq:
-                is_acked_before = True
-                break
-        if not is_acked_before:
+
+        if seq not in self.acked:
             self.acked.append(seq)
         self.on_fly = [x for x in self.on_fly if x[1] != seq]
     
     def is_open_to_send(self):
-        return len(self.on_fly) < self.rwnd and not self.is_complete()
+        return len(self.on_fly) < self.rwnd + 1 and not self.is_complete()
     
 
     def handle_on_fly(self, executor):
-        for i in range(len(self.on_fly)):
-            packet = self.on_fly[i]
+        sent = []
+        for packet in self.on_fly:
             if time.time() - packet[0] > PACKET_TIMEOUT:
+                sent.append(packet[1])
                 logging.info(f"[SendCtxExecutor] Resending packet {packet[1]}")
                 executor.send_message(self.ip, MessageType.file, content=self.build_message(packet[1]), override=True, protocol=socket.SOCK_DGRAM)
-                self.on_fly[i] = (time.time(), packet[1])
-
+        self.on_fly = [x for x in self.on_fly if x[1] not in sent] + [(time.time(), x) for x in sent]
+    
     def execute(self, seq, rwnd, executor):
         # ack the seq
-        logging.info(f"[SendCtxExecutor] ACK: {seq}, RWND: {rwnd}")
+        logging.info(f"[SendCtxExecutor] ACK: {seq}, RWND: {rwnd} TARGET: {self.packet_count} REMAINING: {self.packet_count - len(self.acked)}")
         self.rwnd = rwnd
-        self.ack(seq)
-        logging.info(f"[SendCtxExecutor] ACKED: {self.acked} ON_FLY: {self.on_fly} RWND: {self.rwnd}")
+        if seq != 0:
+            self.ack(seq)
+            logging.info(f"[SendCtxExecutor] ACKED: {self.acked} ON_FLY: {self.on_fly} RWND: {self.rwnd}")
         while self.is_open_to_send():
             message = self.get_next_message()
-            if message:
+            if message and message["seq"] not in self.sent:
                 executor.send_message(self.ip, MessageType.file, content=message, override=True, protocol=socket.SOCK_DGRAM)
+                self.sent.append(message["seq"])
+            elif message and  message["seq"] in self.sent and message["seq"] not in self.on_fly:
+                executor.send_message(self.ip, MessageType.file, content=message, override=True, protocol=socket.SOCK_DGRAM)
+                self.on_fly.append((time.time(), message["seq"]))
             else:
                 break
         # resend timed out packets
@@ -162,10 +165,9 @@ class RecvCtx:
         message = ACK_MESSAGE.copy()
         message["name"] = self.filepath
         message["seq"] = seq
-        message["rwnd"] = self.packet_count - len(self.acked)
+        message["rwnd"] = RWND if self.packet_count - seq > RWND else self.packet_count - seq
 
         return message
-
 
     def add_packet(self, packet):
         is_duplicate = False
@@ -175,9 +177,10 @@ class RecvCtx:
                 break
         if not is_duplicate:
             self.packets.append(packet)
+        
 
     def is_complete(self):
-        return self.seq == self.packet_count
+        return len(self.acked) == self.packet_count
 
     def build_file(self):
         self.packets.sort(key=lambda x: x["seq"])
@@ -196,20 +199,33 @@ class RecvCtx:
     def write_to_file(self):
         with open(self.filepath, "wb") as file:
             for packet in self.packets:
-                file.write(packet)
+                data = base64.b64decode(packet["body"])
+                file.write(data)
+    
+    def ack(self, seq):
+        if seq not in self.acked:
+            self.acked.append(seq)
+        
 
     def execute(self,  data, executor):
-        logging.info(f"[RecvCtxExecutor] ACK: {data['seq']}")
-        self.add_packet(data)
-        self.acked.append(data["seq"])
-        logging.info(f"[RecvCtxExecutor] ACKED: {self.acked} rate: {len(self.acked) / self.packet_count}")
-        message = self.build_message(data["seq"])
-        executor.send_message(self.ip, MessageType.ack, content=message, override=True, protocol=socket.SOCK_STREAM)
+        if data["seq"] == 0:
+            logging.info("[RecvCtxExecutor] File size is received.")
+            message = self.build_message(data["seq"])
+            executor.send_message(self.ip, MessageType.ack, content=message, override=True, protocol=socket.SOCK_STREAM)
+            return False
+        else:
+            logging.info(f"[RecvCtxExecutor] ACK: {data['seq']}")
+            self.add_packet(data)
+            self.ack(data["seq"])
+            logging.info(f"[RecvCtxExecutor] ACKED: {self.acked} rate: {len(self.acked) / self.packet_count}")
+            message = self.build_message(data["seq"])
+            executor.send_message(self.ip, MessageType.ack, content=message, override=True, protocol=socket.SOCK_STREAM)
 
-        if self.is_complete():
-            self.save()
-            return True
-        return False
+            if self.is_complete():
+                logging.info(f"[RecvCtxExecutor] File {self.filepath} is complete.")
+                self.save()
+                return True
+            return False
 
 class Netchat:
     def __init__(self, name: str = None):
@@ -246,7 +262,10 @@ class Netchat:
         print(f"Discovery completed, ready to chat.")
 
         self.user_input_thread = threading.Thread(target=self.listen_user)
+
         self.send_ctx_manager_thread = threading.Thread(target=lambda : self.send_ctx_manager(self))
+        self.send_ctx_manager_thread.start()
+
         self.user_input_thread.start()
         self.user_input_thread.join()
         self.send_ctx_manager_thread.join()
@@ -422,11 +441,22 @@ class Netchat:
     def send_ctx_manager(self,executor):
         while True and not self.terminate:
             time.sleep(0.5) # 1 sec timeout, poll every 0.5
-            for ip in self.send_ctxs:
-                for filename in self.send_ctxs[ip]:
-                    ctx = self.send_ctxs[ip][filename]
-                    ctx.handle_on_fly(executor)
-                
+            try:
+                for ip in self.send_ctxs:
+                    for filename in self.send_ctxs[ip]:
+                        ctx = self.send_ctxs[ip][filename]
+                        if ctx != None and ctx.is_complete():
+                            logging.info(f"[send_ctx_manager]: {ip} {filename} is complete")
+                            del self.send_ctxs[ip][filename]
+                        elif ctx != None:
+                            logging.info(f"[send_ctx_manager]: {ip} {filename} is not complete.Resending...")
+                            ctx.handle_on_fly(executor)
+            except IndexError:
+                # concurrency issue, should have implemented locks
+                pass
+            except Exception as e:
+                print(e)
+    
     def process_message(self, data: str, ip: str):
         try:
             data = json.loads(data)
@@ -451,7 +481,7 @@ class Netchat:
 
             if data["type"] == MESSAGE["type"]:
                 logging.info(
-                    f"Processing message from {self.peers[ip]}({ip})")
+                    f"Processing message from {self.peers[ip][1]}({ip})")
                 _content = data['content']
                 _from = 'UNKNOWN_HOST' if ip not in self.peers.keys(
                 ) else self.peers[ip][1]
@@ -460,14 +490,14 @@ class Netchat:
                 
             if data["type"] == ACK_MESSAGE["type"]:
                 logging.info(
-                    f"Processing ACK from {self.peers[ip]}({ip}) for {data['name']}")
+                    f"Processing ACK from {self.peers[ip][1]}({ip}) for {data['name']}")
                 _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
                 ) else self.peers[ip][1]
                 ## DAEMON WILL HANDLE THIS
                 send_ctx = self.send_ctxs[ip][data["name"]]
                 state = send_ctx.execute(seq=data["seq"], rwnd = int(data["rwnd"]), executor=self)
                 if state == True:
-                    logging.info(f"{data['file']} sent to {ip}")
+                    logging.info(f"{data['name']} sent to {ip}")
                     self.send_ctxs[ip][data["name"]] = None
                     
 
@@ -486,13 +516,14 @@ class Netchat:
                 recv_ctx = self.recv_ctxs[ip][data["name"]]
                 state = recv_ctx.execute(data=data, executor=self)
                 if state:
-                    logging.info(f"FROM:{_sender}(file): <{data['name']} received.>")
+                    logging.info(f"{data['name']} received from {ip}")
+                    print(f"FROM:{_sender}(file): <{data['name']} received.>")
                     recv_ctx.save()
-                    self.recv_ctxs[ip][data["name"]] = None
+                    del self.recv_ctxs[ip][data["name"]]
 
         except KeyError as e:
             logging.error(
-                f"Incoming message with unexpected structure. Message: {e, data}")
+                f"Incoming message with unexpected structure. Message: {e, data, traceback.format_exc()}")
         except Exception as e:
             logging.error(f"Unexpected error. Check the exception: {traceback.format_exc()}")
 
