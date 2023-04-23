@@ -463,7 +463,7 @@ class Netchat:
         except Exception as e:
             print(f"Error while parsing the message. Reason: {data, traceback.format_exc()}")
         try:
-            logging.info(f"Processing the message from {ip, data}")
+            # logging.info(f"Processing the message from {ip, data}")
             if data["type"] == HELLO_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} reached to say 'hello'")
                 self.peers[ip] = (time.time(), data["myname"])
