@@ -30,14 +30,14 @@ MESSAGE = {
 }
 
 FILE_MESSAGE = {
-    "type": 4,
+    "type": '4',
     "name": None,
     "seq": None,
     "body":None
 }
 
 ACK_MESSAGE = {
-    "type": 5,
+    "type": '5',
     "name": None,
     "seq": None,
     "rwnd":None
@@ -463,6 +463,7 @@ class Netchat:
         except Exception as e:
             print(f"Error while parsing the message. Reason: {data, traceback.format_exc()}")
         try:
+            logging.info(f"Processing the message from {ip, data}")
             if data["type"] == HELLO_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} reached to say 'hello'")
                 self.peers[ip] = (time.time(), data["myname"])
@@ -552,16 +553,6 @@ class Netchat:
                     if e.errno == errno.ECONNREFUSED or 'Connection refused' in str(
                             e):
                         logging.info(f"Host refused to connect")
-        # elif protocol == socket.SOCK_DGRAM:
-        #     while True and not self.terminate:
-        #         buffer_size = 1024
-        #         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        #             s.bind((ip, port))
-        #             s.setblocking(0)
-        #             result = select.select([s], [], [])
-        #             msg, sender = result[0][0].recvfrom(buffer_size)
-        #             sender = sender[0]
-        #             self.process_message(msg, sender)
 
     def listen_broadcast(self, port=PORT):
         while True and not self.terminate:
@@ -573,7 +564,7 @@ class Netchat:
                 msg, sender = result[0][0].recvfrom(buffer_size)
                 sender = sender[0]
                 msg = msg.decode('utf-8')
-                self.process_message(msg, sender)
+                threading.Thread(target=lambda :self.process_message(msg, sender)).start()
 
                 for peer in list(self.peers.keys()):
                     if time.time() - self.peers[peer][0] > PRUNING_PERIOD:
