@@ -50,7 +50,6 @@ PRUNING_PERIOD = 120
 BATCH_SIZE = 1500 # bytes
 RWND = 10
 PACKET_TIMEOUT = 1
-# TODO :Find a way of closing the self-listener thread.
 
 
 class MessageType(enum.Enum):
@@ -82,7 +81,6 @@ class SendCtx:
         self.sent = []
 
         with open(self.filepath, "rb") as file:
-            # divide into batch size packets and store in self.packets
             while (batch := file.read(self.batch_size)):
                 self.packets.append(base64.b64encode(batch))
 
@@ -106,7 +104,6 @@ class SendCtx:
         return len(self.on_fly) == 0 and len(self.acked) == self.packet_count
     
     def ack(self, seq):
-
         if seq not in self.acked:
             self.acked.append(seq)
         self.on_fly = [x for x in self.on_fly if x[1] != seq]
@@ -317,8 +314,6 @@ class Netchat:
                     print("Invalid command. Usage: :hello ip")
             if line.startswith(":send_file"):
                 try:
-                    # strip command from the second empty spaace and keep the
-                    # rest as content
                     name, filename = line.split(
                         " ", 2)[1], line.split(
                         " ", 2)[2]
@@ -348,8 +343,6 @@ class Netchat:
 
             elif line.startswith(":send"):
                 try:
-                    # strip command from the second empty spaace and keep the
-                    # rest as content
                     name, content = line.split(
                         " ", 2)[1], line.split(
                         " ", 2)[2]
@@ -377,16 +370,6 @@ class Netchat:
                     s.sendto(json.dumps(hello_message).encode(
                         'utf-8'), ('<broadcast>', port))
                 logging.info("Done.")
-                
-    # def file_transfer_daemon(self):
-    #     while True and not self.terminate:
-    #         for ip in self.send_ctxs:
-    #             for filename in self.send_ctxs[ip]:
-    #                 ctx = self.send_ctxs[ip][filename]
-    #                 state = ctx.execute(executor=self)
-    #                 if state == True:
-    #                     del self.send_ctxs[ip][filename]
-    #                     print(f"File {filename} sent to {ip}.")
 
     def send_message(self, 
                      ip: str, 
@@ -503,10 +486,13 @@ class Netchat:
                     
 
             if data["type"] == FILE_MESSAGE["type"]:
-                logging.info(
-                    f"Processing {data['name']} from {self.peers[ip][1]}({ip})")
-                _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
-                ) else self.peers[ip][1]
+                try:
+                    logging.info(
+                        f"Processing {data['name']} from {self.peers[ip][1]}({ip})")
+                    _sender = 'UNKNOWN_HOST' if ip not in self.peers.keys(
+                    ) else self.peers[ip][1]
+                except KeyError:
+                    pass
                 # lazy init
                 if ip not in self.recv_ctxs.keys():
                     self.recv_ctxs[ip] = {}
