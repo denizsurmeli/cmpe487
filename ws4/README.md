@@ -25,3 +25,4 @@ docker run --rm -it --entrypoint bash ws4_cmpe487
 
 ## Notes
 -- `requirements.txt` file has some dependencies, but they are for the linter and formatter. If you don't have them, it's OK.
+-- It's under MIT license, so you can distribute if you want.
