@@ -11,8 +11,18 @@ import time
 import os
 import traceback
 import base64
+import pyDes
+import hashlib
+import random 
 
 PORT = 12345
+
+CACHED_PRIMES = [
+    15487103,15487139,15487151, 15487177, 
+    15487237, 15487243, 15487249, 15487253,
+    694934353, 694934369, 694934371 ,694934389,
+    694934393, 694934411, 694934419, 694934423
+    ]
 
 HELLO_MESSAGE = {
     "type": "hello",
@@ -43,6 +53,15 @@ ACK_MESSAGE = {
     "rwnd":None
 }
 
+# Message for  key exchange
+INIT_MESSAGE = {
+    "type": "init",
+    "g": None,
+    "p": None,
+    "A": None,
+}
+
+
 
 IP_PATTERN = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
 BROADCAST_PERIOD = 60
@@ -58,6 +77,7 @@ class MessageType(enum.Enum):
     message = 3
     file = 4
     ack = 5
+    init = 6
 
 
 
@@ -226,6 +246,7 @@ class RecvCtx:
 
 class Netchat:
     def __init__(self, name: str = None):
+        random.shuffle(CACHED_PRIMES)
         logging.info("Finding out whoami.")
         self.terminate = False
         hostname: str = socket.gethostname()
@@ -239,6 +260,8 @@ class Netchat:
         self.whoami: dict = dict()
         self.whoami["myname"] = name if name is not None else hostname
         self.whoami["ip"] = ipaddress
+
+        self.secret = random.randint(2**2, 2**8) # pick a random number 
 
         self.peers: dict = {}
         self.listener_threads: dict = {}
@@ -266,6 +289,18 @@ class Netchat:
         self.user_input_thread.start()
         self.user_input_thread.join()
         self.send_ctx_manager_thread.join()
+
+    # def is_prime(self, x:int) -> bool:
+    #     for i in range(2, x):
+    #         if x % i == 0:
+    #             return False
+    #     return True
+
+    def random_prime_picker(self, l:int = 2 ** 8, h:int = 2**16) -> int:
+        candidates = CACHED_PRIMES
+        return candidates[random.randint(0, len(candidates) - 1)]
+
+
 
     def show_peers(self):
         print("IP:\t\tName:")
@@ -352,9 +387,28 @@ class Netchat:
                     if ip is None:
                         print(f"Peer with name \"{name}\" not found.")
                     else:
+                        # third item is the key shared
+                        if self.peers[ip][2] == None:
+                            logging.info(f"No keys exchanged before. Starting with {ip}")
+                            # lock the client until you recieve the key
+                            g, p = self.random_prime_picker(), self.random_prime_picker()
+                            B = (g**self.secret) % p
+                            self.send_message(ip, MessageType.init, content={
+                                "type":"init",
+                                "g":g,
+                                "p":p,
+                                "A":B
+                            })
+                            logging.info(f"Key sent to {ip}. Awaiting peer...")
+                            # key_exchanged = False
+                            # while key_exchanged == False:
+                            #     time.sleep(0.050) # sleep for 50ms
+                            #     if self.peers[ip][2] != None:
+                            #         key_exchanged = True
                         self.send_message(
                             ip, MessageType.message, content=content)
-                except BaseException as e:
+                except Exception as e:
+                    print(e)
                     print("Invalid command. Usage: :send name message")
 
     def broadcast(self, port: int = PORT) -> dict:
@@ -395,8 +449,18 @@ class Netchat:
                         message["myname"] = self.whoami["myname"]
                     if type == MessageType.message:
                         message = MESSAGE.copy()
-                        message["content"] = content
-                    if type == MessageType.ack:
+                        while self.peers[ip][2] == None:
+                            time.sleep(0.01) # sleep for 10 ms, until you receive the key from counterparty
+                        # encrypt the content
+                        key = str(self.peers[ip][2])
+                        encrypted_content = pyDes.triple_des(key.ljust(24)).encrypt(content,padmode = 2)
+                        print(encrypted_content)
+                        # evolve the key using key and encrypted content using hashlib.sha256
+                        key = hashlib.sha256(key.encode('utf-8') + encrypted_content).digest()
+
+                        # use base64 for text transmission
+                        message["content"] = base64.b64encode(encrypted_content).decode("utf-8")
+                    if type == MessageType.ack or type == MessageType.init:
                         message = content # it's overriden we know
 
                     encode = json.dumps(message).encode('utf-8')
@@ -443,13 +507,14 @@ class Netchat:
     def process_message(self, data: str, ip: str):
         try:
             data = json.loads(data)
+            logging.info(f"Message:{data}")
         except Exception as e:
             print(f"Error while parsing the message. Reason: {data, traceback.format_exc()}")
         try:
             # logging.info(f"Processing the message from {ip, data}")
             if data["type"] == HELLO_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} reached to say 'hello'")
-                self.peers[ip] = (time.time(), data["myname"])
+                self.peers[ip] = [time.time(), data["myname"], None]
                 self.listener_threads[ip] = [
                     threading.Thread(target=lambda: self.listen_peer(ip)),
                     threading.Thread(target=lambda: self.listen_peer(ip, protocol=socket.SOCK_DGRAM))
@@ -459,18 +524,22 @@ class Netchat:
                 logging.info(f"Sending 'aleykumselam' to {ip}")
                 self.send_message(ip, MessageType.aleykumselam)
 
-            if data["type"] == AS_MESSAGE["type"]:
+            if data["type"] == AS_MESSAGE["type"] and ip != self.whoami["ip"]:
                 logging.info(f"{ip} said 'aleykumselam'")
-                self.peers[ip] = (time.time(), data["myname"])
+                self.peers[ip] = [time.time(), data["myname"], None]
 
             if data["type"] == MESSAGE["type"]:
                 logging.info(
                     f"Processing message from {self.peers[ip][1]}({ip})")
-                _content = data['content']
+                encrypted_content = base64.b64decode(data['content'])
                 _from = 'UNKNOWN_HOST' if ip not in self.peers.keys(
                 ) else self.peers[ip][1]
-                print(
-                    f"[{datetime.datetime.now()}] FROM: {_from}({ip}): {_content}")
+                key = str(self.peers[ip][2])
+                #decrypt
+                decrypted_message = pyDes.triple_des(key.ljust(24)).decrypt(encrypted_content, padmode=2).decode("utf-8")
+                #evolve
+                key = hashlib.sha256(key.encode('utf-8') + encrypted_content).digest()                
+                print(f"[{datetime.datetime.now()}] FROM: {_from}({ip}): {decrypted_message}")
                 
             if data["type"] == ACK_MESSAGE["type"]:
                 logging.info(
@@ -507,6 +576,24 @@ class Netchat:
                     print(f"FROM:{_sender}(file): <{data['name']} received.>")
                     recv_ctx.save()
                     del self.recv_ctxs[ip][data["name"]]
+
+            if data["type"] == INIT_MESSAGE["type"]:
+                if self.peers[ip][2] == None:
+                    logging.info(f"Received [INIT] for key exchange from {ip}")
+                    try:
+                        g, p = int(data["g"]), int(data["p"])
+                        A = data["A"] # sender always sends as A 
+                        B = (g**self.secret) % p
+                        self.peers[ip][2] = (A**self.secret) % p
+                        logging.info(f"Sending {ip} peer the key.")
+                        self.send_message(ip, MessageType.init, content = {
+                            "type":"init",
+                            "g": g,
+                            "p": p,
+                            "A": B
+                        })
+                    except Exception as e:
+                        print(e)
 
         except KeyError as e:
             logging.error(
