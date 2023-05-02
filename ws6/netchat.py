@@ -454,10 +454,9 @@ class Netchat:
                         # encrypt the content
                         key = str(self.peers[ip][2])
                         encrypted_content = pyDes.triple_des(key.ljust(24)).encrypt(content,padmode = 2)
-                        print(encrypted_content)
                         # evolve the key using key and encrypted content using hashlib.sha256
                         key = hashlib.sha256(key.encode('utf-8') + encrypted_content).digest()
-
+                        logging.info(f"Key: {key}")
                         # use base64 for text transmission
                         message["content"] = base64.b64encode(encrypted_content).decode("utf-8")
                     if type == MessageType.ack or type == MessageType.init:
@@ -507,7 +506,6 @@ class Netchat:
     def process_message(self, data: str, ip: str):
         try:
             data = json.loads(data)
-            logging.info(f"Message:{data}")
         except Exception as e:
             print(f"Error while parsing the message. Reason: {data, traceback.format_exc()}")
         try:
@@ -538,7 +536,8 @@ class Netchat:
                 #decrypt
                 decrypted_message = pyDes.triple_des(key.ljust(24)).decrypt(encrypted_content, padmode=2).decode("utf-8")
                 #evolve
-                key = hashlib.sha256(key.encode('utf-8') + encrypted_content).digest()                
+                key = hashlib.sha256(key.encode('utf-8') + encrypted_content).digest()
+                logging.info(f"Key: {key}")                
                 print(f"[{datetime.datetime.now()}] FROM: {_from}({ip}): {decrypted_message}")
                 
             if data["type"] == ACK_MESSAGE["type"]:
