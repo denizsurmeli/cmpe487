@@ -561,4 +561,4 @@ class Netchat:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    netchat = Netchat("Deniz")
+    netchat = Netchat()
